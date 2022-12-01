@@ -7,6 +7,7 @@ author: Atsushi Sakai (@Atsushi_twi), Göktuğ Karakaşlı
 """
 
 import math
+import time
 from enum import Enum
 
 import matplotlib.pyplot as plt
@@ -21,9 +22,9 @@ def dwa_control(x, config, goal, ob):
     """
     dw = calc_dynamic_window(x, config)
 
-    u, trajectory = calc_control_and_trajectory(x, dw, config, goal, ob)
+    u, trajectory, best_cost = calc_control_and_trajectory(x, dw, config, goal, ob)
 
-    return u, trajectory
+    return u, trajectory, best_cost
 
 
 class RobotType(Enum):
@@ -45,38 +46,27 @@ class Config:
         self.max_delta_yaw_rate = 40.0 * math.pi / 180.0  # [rad/ss]
         self.v_resolution = 0.01  # [m/s]
         self.yaw_rate_resolution = 0.1 * math.pi / 180.0  # [rad/s]
-        self.dt = 0.1  # [s] Time tick for motion prediction
-        self.predict_time = 3.0  # [s]
-        self.to_goal_cost_gain = 0.15
+        self.dt = 0.2  # [s] Time tick for motion prediction
+        self.predict_time = 1.0  # [s]
+        self.to_goal_cost_gain = 0.5
         self.speed_cost_gain = 1.0
-        self.obstacle_cost_gain = 1.0
+        self.obstacle_cost_gain = 0.5
         self.robot_stuck_flag_cons = 0.001  # constant to prevent robot stucked
         self.robot_type = RobotType.circle
 
         # if robot_type == RobotType.circle
         # Also used to check if goal is reached in both types
-        self.robot_radius = 1.0  # [m] for collision check
+        self.robot_radius = 0.05  # [m] for collision check
 
         # if robot_type == RobotType.rectangle
-        self.robot_width = 0.5  # [m] for collision check
-        self.robot_length = 1.2  # [m] for collision check
+        self.robot_width = 0.2  # [m] for collision check
+        self.robot_length = 0.6  # [m] for collision check
         # obstacles [x(m) y(m), ....]
-        self.ob = np.array([[-1, -1],
-                            [0, 2],
-                            [4.0, 2.0],
-                            [5.0, 4.0],
-                            [5.0, 5.0],
-                            [5.0, 6.0],
-                            [5.0, 9.0],
-                            [8.0, 9.0],
-                            [7.0, 9.0],
-                            [8.0, 10.0],
-                            [9.0, 11.0],
-                            [12.0, 13.0],
-                            [12.0, 12.0],
-                            [15.0, 15.0],
-                            [13.0, 13.0]
-                            ])
+        self.ob = np.array([])
+        with open("/Users/petrids/dev/curc/obstacles.npy", "rb") as f:
+            self.ob = np.load(f)[::2]
+        if len(self.ob) == 0:
+            raise ValueError("No obstacle array")
 
     @property
     def robot_type(self):
@@ -160,15 +150,24 @@ def calc_control_and_trajectory(x, dw, config, goal, ob):
 
             trajectory = predict_trajectory(x_init, v, y, config)
             # calc cost
+            start = time.time()
             to_goal_cost = config.to_goal_cost_gain * calc_to_goal_cost(trajectory, goal)
+            print(f"Time to compute goal cost gain: {time.time() - start}")
+
+            start = time.time()
             speed_cost = config.speed_cost_gain * (config.max_speed - trajectory[-1, 3])
+            print(f"Time to compute speed cost gain: {time.time() - start}")
+
+            start = time.time()
             ob_cost = config.obstacle_cost_gain * calc_obstacle_cost(trajectory, ob, config)
+            print(f"Time to compute obstacle cost gain: {time.time() - start}")
 
             final_cost = to_goal_cost + speed_cost + ob_cost
 
             # search minimum trajectory
             if min_cost >= final_cost:
                 min_cost = final_cost
+                best_cost = (to_goal_cost, speed_cost, ob_cost)
                 best_u = [v, y]
                 best_trajectory = trajectory
                 if abs(best_u[0]) < config.robot_stuck_flag_cons \
@@ -178,7 +177,7 @@ def calc_control_and_trajectory(x, dw, config, goal, ob):
                     # best omega=0 rad/s (heading to the goal with
                     # angle difference of 0)
                     best_u[1] = -config.max_delta_yaw_rate
-    return best_u, best_trajectory
+    return best_u, best_trajectory, best_cost
 
 
 def calc_obstacle_cost(trajectory, ob, config):
@@ -211,13 +210,14 @@ def calc_obstacle_cost(trajectory, ob, config):
             return float("Inf")
 
     min_r = np.min(r)
-    return 1.0 / min_r  # OK
+    return 1.0 / min_r
 
 
 def calc_to_goal_cost(trajectory, goal):
     """
         calc to goal cost with angle difference
     """
+
 
     dx = goal[0] - trajectory[-1, 0]
     dy = goal[1] - trajectory[-1, 1]
@@ -226,6 +226,20 @@ def calc_to_goal_cost(trajectory, goal):
     cost = abs(math.atan2(math.sin(cost_angle), math.cos(cost_angle)))
 
     return cost
+
+
+# def calc_to_goal_cost(trajectory, goal):
+#     """
+#         calc to goal cost with angle difference
+#     """
+#
+#     dx = goal[0] - trajectory[-1, 0]
+#     dy = goal[1] - trajectory[-1, 1]
+#     # error_angle = math.atan2(dy, dx)
+#     # cost_angle = error_angle - trajectory[-1, 2]
+#     # cost = abs(math.atan2(math.sin(cost_angle), math.cos(cost_angle)))
+#
+#     return 1 / (dx + dy)
 
 
 def plot_arrow(x, y, yaw, length=0.5, width=0.1):  # pragma: no cover
@@ -260,9 +274,11 @@ def plot_robot(x, y, yaw, config):  # pragma: no cover
 def main(gx=10.0, gy=10.0, robot_type=RobotType.circle):
     print(__file__ + " start!!")
     # initial state [x(m), y(m), yaw(rad), v(m/s), omega(rad/s)]
-    x = np.array([0.0, 0.0, math.pi / 8.0, 0.0, 0.0])
+    with open("/Users/petrids/dev/curc/pose.npy", "rb") as f:
+        state = np.load(f)
+        x = np.array([state[0], state[0], math.pi / 8.0, 0.0, 0.0])
     # goal position [x(m), y(m)]
-    goal = np.array([gx, gy])
+    goal = np.array([-0.4, 2])
 
     # input [forward speed, yaw_rate]
 
@@ -270,7 +286,7 @@ def main(gx=10.0, gy=10.0, robot_type=RobotType.circle):
     trajectory = np.array(x)
     ob = config.ob
     while True:
-        u, predicted_trajectory = dwa_control(x, config, goal, ob)
+        u, predicted_trajectory, best_cost = dwa_control(x, config, goal, ob)
         x = motion(x, u, config.dt)  # simulate robot
         trajectory = np.vstack((trajectory, x))  # store state history
 
@@ -286,6 +302,13 @@ def main(gx=10.0, gy=10.0, robot_type=RobotType.circle):
             plt.plot(ob[:, 0], ob[:, 1], "ok")
             plot_robot(x[0], x[1], x[2], config)
             plot_arrow(x[0], x[1], x[2])
+            to_goal_cost, speed_cost, ob_cost = best_cost
+            plt.text(
+                4,
+                -3,
+                f"to goal: {np.round(to_goal_cost, 3)}\nspeed: {np.round(speed_cost, 3)}\nob: {np.round(ob_cost, 3)}",
+                **dict(fontsize=8, color='black')
+            )
             plt.axis("equal")
             plt.grid(True)
             plt.pause(0.0001)
@@ -305,5 +328,5 @@ def main(gx=10.0, gy=10.0, robot_type=RobotType.circle):
 
 
 if __name__ == '__main__':
-    main(robot_type=RobotType.rectangle)
-    # main(robot_type=RobotType.circle)
+    # main(robot_type=RobotType.rectangle)
+    main(robot_type=RobotType.circle)
